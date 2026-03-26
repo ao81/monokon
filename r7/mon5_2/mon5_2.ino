@@ -1,177 +1,228 @@
 #define USE_TIMER3_ISR
 #include "mono_con.h"
 
-/* 入力の定義 */
 const int x_pin = A1;
-const int D2 = 18; // SW
-const int D3 = 19; // TSW
-int x_pos, SW, TSW;
-int prev_SW;
-const int MIN_x = 0;
-const int MAX_x = 1023;
+const int D1 = 17;  // PH
+const int D2 = 18;  // SW
+const int D3 = 19;  // TSW
 
-/* 出力の定義 */
-const int ledParam[2] = { B000, B100 };
-const int hand7seg[3] = { 0x3f, 0x3e, 0x73 };
+const int ledParam[2] = { B100, B000 };                                              // green, blank
+const int handLed[3] = { 0x3f, 0x3e, 0x73 };                                            // グー, チョキ, パーのled表示
+const int char_cnt[3] = { 3, 6, 6 };                                                 // グリコゲームの文字数
+const int pitch_hz[11] = { 254, 262, 277, 293, 311, 329, 349, 391, 440, 493, 523 };  // 音程ごとの周波数
+const int se_pitch_idx[3][6] = {
+  { 6, 0, 1, -1, -1, -1 },
+  { 1, 5, 7, 10, 0, 1 },
+  { 5, 3, 1, 8, 0, 1 }
+};
 
-/* 手ごとの文字数 */
-const int charCnt[3] = { 3, 6, 6 };
+int x_pos = 0;
+int PH = 0;
+int SW = HIGH;
+int TSW = 0;
 
-/* カウントダウンの時間 */
-const int CD_TIME = 3000;
+int prev_sw = HIGH, prev_tsw = HIGH;
+int ex = 0;
 
-/* ゲームの状態の定義 */
+int step_rem = 0;
+int step_dir = 1;
+
+word in, spm, ff, se;
+int cnt = -1;
+
+int playing_ff = 2;  // 0:pl 1:cp 2:stop
+int se_index = 0;   // 0~5
+
+bool result_check = false;
+
 typedef enum {
-	INIT,
-	WAIT,
-	COUNTDOWN,
-	JUDGE,
-	STEP,
-	FANFARE,
-	GAMEOVER,
-} GameStates;
-GameStates gs;
+  PLAYING,
+  WAITING,
+  GAMEEND
+} GameState;
+GameState gs = GAMEEND;
 
-/* じゃんけんの手の定義 */
 typedef enum {
-	GU,
-	TYO,
-	PA,
+  GU,
+  TYO,
+  PA,
+  NONE
 } Hand;
-Hand pl_hand, cp_hand;
+Hand cp_hand = NONE, pl_hand = NONE;
+Hand se_hand = NONE;
 
-/* じゃんけんの結果の定義 */
-typedef enum {
-	AIKO,
-	PLAYER,
-	COMPUTER,
-} Judge;
-Judge judge;
+void setup() {
+  config_init();
+  serial_init();
+  noTone(BZ_PIN);
 
-/* ステップで使う変数 */
-int stepCnt;
-
-/* 割り込みで使う変数 */
-word in_sw;
-int cnt;
-
-/**
- * @return プレイヤーの手
- */
-Hand input_hand() {
-	x_pos = analogRead(x_pin);
-	if (x_pos > MAX_x - 300) return GU;
-	else if (x_pos < MIN_x + 300) return PA;
-	else return TYO;
-}
-
-/**
- * じゃんけんの結果判定
- * @param pl プレイヤーの手
- * @param cp コンピュータの手
- */
-Judge janken_result(Hand pl, Hand cp) {
-	return (Judge)(pl - cp + 3) % 3;
-}
-
-/**
- * ステッピングモータをnとjudgeに応じて回転させる
- * @param n ステップ数
- */
-void step_spmotor(int n) {
-	int dir = (judge == PLAYER) ? -1 : 1;
-
+  disp(num[10], num[10]);
 }
 
 ISR(TIMER3_COMPA_vect) {
-	if (in_sw > 5) {
-		in_sw = 0;
-		prev_SW = SW;
-		SW = digitalRead(D2);
-	}
-	in_sw++;
+  if (in > 5) {
+    in = 0;
 
-	TSW = digitalRead(D3);
+    x_pos = analogRead(A1);
+    PH = digitalRead(D1);
+    SW = digitalRead(D2);
+    TSW = digitalRead(D3);
+  }
+  in++;
 
-	if (cnt > -1) cnt--;
+  if (spm > 400) {
+    spm = 0;
+    if (step_rem > 0) {
+      lm.bit.SM = stepm_init(((ex % 4) + 4) % 4);
+      led_stepmotor(lm.b8);
+      ex += step_dir;
+      step_rem--;
 
-	// TODO: spmotorの処理
+      se = 400;
+    }
+  }
+  spm++;
+
+  if (se > 0) {
+    se--;
+    if (se == 399) {
+      if (se_index < char_cnt[se_hand]) {
+        tone(BZ_PIN, pitch_hz[se_pitch_idx[se_hand][se_index++]]);
+      }
+    } else if (se == 0) {
+      noTone(BZ_PIN);
+    }
+  }
+
+  if (cnt > 0) cnt--;
+  if (SW == LOW && prev_sw == HIGH && gs == PLAYING) {
+    cnt = 3000; // じゃんけんのカウントダウン
+    gs = WAITING;
+  }
+  prev_sw = SW;
+
+  if (playing_ff == 0) {  // pl
+    if (ff <= 2800) ff++;
+  } else if (playing_ff == 1) {  // cp
+    if (ff <= 800) ff++;
+  }
 }
 
-void setup() {
-	config_init();
-	serial_init();
-	noTone(BZ_PIN);
-	disp(num[10], num[10]);
+Hand input_hand() {
+  if (x_pos < 225) {
+    return PA;
+  } else if (x_pos > 775) {
+    return GU;
+  } else {
+    return TYO;
+  }
+}
 
-	randomSeed(millis());
+int judge(int p, int c) {  // じゃんけんの勝敗
+  return (p - c + 3) % 3;
+}
 
-	PH = digitalRead(D1);
-	SW = prev_SW = digitalRead(D2);
-	TSW = digitalRead(D3);
+void step_n(int n, Hand winner) {  // +:cw -:ccw
+  step_dir = (n > 0) ? 1 : -1;
+  step_rem = abs(n);
+  se_index = 0;
+  se_hand = winner;
+}
 
-	gs = INIT;
-	pl_hand = GU;
-	cp_hand = GU;
-	judge = AIKO;
-	stepCnt = 0;
+void fanfare(int type) {
+  playing_ff = type;
 
-	cnt = -1;
+  if (type == 0) { // pl
+    playing_ff = 0;
+
+    if (ff < 400) {
+      tone(BZ_PIN, pitch_hz[1]);
+    } else if (ff < 600) {
+      tone(BZ_PIN, pitch_hz[5]);
+    } else if (ff < 800) {
+      tone(BZ_PIN, pitch_hz[7]);
+    } else if (ff < 1600) {
+      tone(BZ_PIN, pitch_hz[10]);
+    } else if (ff < 2400) {
+      tone(BZ_PIN, pitch_hz[9]);
+    } else if (ff < 2800) {
+      tone(BZ_PIN, pitch_hz[10]);
+    } else {
+      noTone(BZ_PIN);
+      playing_ff = 2;
+    }
+
+  } else if (type == 1) { // cp
+    playing_ff = 1;
+
+    int phase = (ff / 200) % 4;
+    int step = (ff % 200) / 50;
+
+    if (ff < 800) {
+      tone(BZ_PIN, pitch_hz[1 + step]);
+    } else {
+      noTone(BZ_PIN);
+      playing_ff = 2;
+    }
+  }
 }
 
 void loop() {
-	if (TSW == LOW) {
-		gs = INIT;
-	} else {
-		if (gs == INIT) gs = WAIT;
-	}
+  if (playing_ff == 0) fanfare(0);
+  else if (playing_ff == 1) fanfare(1);
 
-	switch (gs) {
-	case INIT:
-		lm.color.GBR = ledParam[0];
-		noTone(BZ_PIN);
-		disp(num[10], num[10]);
+  /* ゲームの勝敗判定 */
+  if (result_check && step_rem == 0) {
+    result_check = false;
+    gs = PLAYING;
+    ff = 0;
+    if (ex <= -14) {
+      fanfare(0);
+      gs = GAMEEND;
+    } else if (ex >= 14) {
+      fanfare(1);
+      gs = GAMEEND;
+    }
+  }
 
-		break;
+  if (TSW == LOW) {
+    if (prev_tsw != TSW) gs = PLAYING;
 
-	case WAIT:
-		lm.color.GBR = ledParam[1];
-		if (SW == LOW && prev_SW == HIGH) gs = COUNTDOWN;
+    lm.color.GBR = ledParam[0];
+    if (cnt == 3000) disp(num[2], num[10]);
+    if (cnt == 2000) disp(num[1], num[10]);
+    if (cnt == 1000) disp(num[0], num[10]);
+    if (cnt == 0) {
+      cnt = -1;
 
-		break;
+      pl_hand = input_hand();
+      do {  // あいこにならないため
+        cp_hand = random(0, 3);
+      } while (pl_hand == cp_hand);
 
-	case COUNTDOWN:
-		cnt = CD_TIME;
-		if (cnt == 3000) disp(num[2], num[10]);
-		if (cnt == 2000) disp(num[1], num[10]);
-		if (cnt == 1000) disp(num[0], num[10]);
-		if (cnt == 0) gs = JUDGE;
+      int result = judge(pl_hand, cp_hand);
+      if (result == 1) {  // cpの勝ち
+        disp(handLed[pl_hand], handLed[cp_hand] | 0x80);
+        step_n(char_cnt[cp_hand], cp_hand);
+      } else if (result == 2) {  // playerの勝ち
+        disp(handLed[pl_hand] | 0x80, handLed[cp_hand]);
+        step_n(-char_cnt[pl_hand], pl_hand);
+      }
 
-		break;
+      result_check = true;
+    }
 
-	case JUDGE:
-		pl_hand = input_hand();
-		cp_hand = (Hand)random(3);
-		judge = janken_result(pl_hand, cp_hand);
-		if (judge == AIKO) gs = WAIT;
-		else gs = STEP;
+  } else {
+    if (prev_tsw != TSW) {
+      gs = GAMEEND;
+      ex = 0;
 
-		break;
+      noTone(BZ_PIN);
+      disp(num[10], num[10]);
+      lm.color.GBR = ledParam[1];
+    }
+  }
 
-	case STEP:
-		
-
-		break;
-
-	case FANFARE:
-		
-
-		break;
-
-	case GAMEOVER:
-		
-
-		break;
-
-	}
+  prev_tsw = TSW;
+  led_stepmotor(lm.b8);
 }
